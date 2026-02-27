@@ -2,7 +2,7 @@
 
 A web-based dashboard for monitoring [OpenSpec](https://github.com/org/openspec) progress across multiple workspaces. Track features, tasks, and artifacts with a real-time kanban-style interface.
 
-![Specboard Screenshot](screenshot.png)
+![Specboard Screenshot](/assets/gh-screenshot.png)
 
 ## Features
 
@@ -17,6 +17,8 @@ A web-based dashboard for monitoring [OpenSpec](https://github.com/org/openspec)
 ## Prerequisites
 
 - [Bun](https://bun.sh/) runtime (v1.0 or later)
+- [OpenSpec](https://github.com/Fission-AI/OpenSpec/) for spec-driven development
+- [Conductor](http://conductor.build) optional to manage workspaces, worktrees automatically
 - VS Code with `code` CLI (optional, for "Open in VS Code" feature)
 
 ## Installation
