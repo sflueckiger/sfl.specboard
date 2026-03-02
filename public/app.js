@@ -407,6 +407,113 @@ async function loadFeatures(repoName) {
 }
 
 // =============================================================================
+// Feature Deduplication
+// =============================================================================
+
+/**
+ * Count the number of artifacts present for a feature
+ * @param {Object} feature - Feature object
+ * @returns {number} Count of artifacts (0-4)
+ */
+function countArtifacts(feature) {
+  let count = 0;
+  if (feature.hasProposal) count++;
+  if (feature.hasDesign) count++;
+  if (feature.specs && feature.specs.length > 0) count++;
+  if (feature.tasks && feature.tasks.length > 0) count++;
+  return count;
+}
+
+/**
+ * Count the number of completed tasks in a feature
+ * @param {Object} feature - Feature object
+ * @returns {number} Count of completed subtasks
+ */
+function countCompletedTasks(feature) {
+  if (!feature.tasks) return 0;
+  return feature.tasks.reduce((total, task) => {
+    if (!task.subtasks) return total;
+    return total + task.subtasks.filter(s => s.completed).length;
+  }, 0);
+}
+
+/**
+ * Count the total number of features in a specific worktree
+ * @param {Array} features - Array of all features
+ * @param {string} worktree - Worktree name to count
+ * @returns {number} Count of features in the worktree
+ */
+function countWorktreeFeatures(features, worktree) {
+  return features.filter(f => f.worktree === worktree).length;
+}
+
+/**
+ * Select the canonical (best) feature from a list of duplicates
+ * Uses three-tier comparison:
+ * 1. Artifact count (more is better)
+ * 2. Completed task count (more is better)
+ * 3. Workspace isolation (single feature in worktree is better)
+ *
+ * @param {Array} duplicates - Array of feature objects with same name
+ * @param {Array} allFeatures - All features for worktree counting
+ * @returns {Object} The canonical feature instance
+ */
+function selectCanonicalFeature(duplicates, allFeatures) {
+  if (duplicates.length === 1) return duplicates[0];
+
+  return duplicates.reduce((best, current) => {
+    // Tier 1: Compare artifact count FOR THIS FEATURE
+    const bestArtifacts = countArtifacts(best);
+    const currentArtifacts = countArtifacts(current);
+    if (currentArtifacts > bestArtifacts) return current;
+    if (currentArtifacts < bestArtifacts) return best;
+
+    // Tier 2: Compare completed task count FOR THIS FEATURE
+    const bestCompleted = countCompletedTasks(best);
+    const currentCompleted = countCompletedTasks(current);
+    if (currentCompleted > bestCompleted) return current;
+    if (currentCompleted < bestCompleted) return best;
+
+    // Tier 3: Compare workspace isolation (fewer features in worktree is better)
+    const bestWorktreeCount = countWorktreeFeatures(allFeatures, best.worktree);
+    const currentWorktreeCount = countWorktreeFeatures(allFeatures, current.worktree);
+    if (currentWorktreeCount < bestWorktreeCount) return current;
+    if (currentWorktreeCount > bestWorktreeCount) return best;
+
+    // All tiebreakers equal - keep first (stable sort)
+    return best;
+  });
+}
+
+/**
+ * Deduplicate features by name within a repository
+ * When the same feature exists in multiple worktrees, selects the most
+ * complete instance based on artifacts, task completion, and workspace isolation.
+ *
+ * @param {Array} features - Array of feature objects
+ * @returns {Array} Deduplicated array of features
+ */
+function deduplicateFeatures(features) {
+  // Group features by name
+  const featuresByName = {};
+  features.forEach(feature => {
+    if (!featuresByName[feature.name]) {
+      featuresByName[feature.name] = [];
+    }
+    featuresByName[feature.name].push(feature);
+  });
+
+  // For each group, select the canonical instance
+  const deduplicated = [];
+  for (const [name, duplicates] of Object.entries(featuresByName)) {
+    const canonical = selectCanonicalFeature(duplicates, features);
+    deduplicated.push(canonical);
+  }
+
+  return deduplicated;
+}
+
+// =============================================================================
 // Live View Rendering
 // =============================================================================
 
@@ -425,8 +532,11 @@ function renderSwimlanesHeader(activeCount) {
 
 /** Render features as swimlanes with kanban columns */
 function renderFeatures(features) {
-  const activeFeatures = features.filter(f => !f.isArchived);
-  const archivedFeatures = features.filter(f => f.isArchived);
+  // Apply deduplication to show only canonical instances
+  const deduplicated = deduplicateFeatures(features);
+
+  const activeFeatures = deduplicated.filter(f => !f.isArchived);
+  const archivedFeatures = deduplicated.filter(f => f.isArchived);
 
   if (activeFeatures.length === 0 && archivedFeatures.length === 0) {
     swimlanes.innerHTML = '<p class="empty-state">No features found in this repository</p>';
@@ -645,8 +755,11 @@ function renderFeatureCard(feature, index) {
 
 /** Render features as clickable cards */
 function renderFeaturesList() {
-  const activeFeatures = featuresData.filter(f => !f.isArchived);
-  const archivedFeatures = featuresData.filter(f => f.isArchived);
+  // Apply deduplication to show only canonical instances
+  const deduplicated = deduplicateFeatures(featuresData);
+
+  const activeFeatures = deduplicated.filter(f => !f.isArchived);
+  const archivedFeatures = deduplicated.filter(f => f.isArchived);
 
   if (activeFeatures.length === 0 && archivedFeatures.length === 0) {
     featuresList.innerHTML = '<p class="empty-state">No features found in this repository</p>';
@@ -1439,12 +1552,16 @@ function escapeHtml(text) {
 
 /**
  * Check if a subtask is a manual verification task
- * Matches: "Manual QA" prefix, "(manual)" suffix, "— manual" anywhere
+ * Matches: "Manual QA" prefix, "(manual)" suffix, "— manual" anywhere,
+ * "manual verification", "manual test", "manual check" prefixes
  */
 function isManualSubtask(title) {
   const lowerTitle = title.toLowerCase();
   return (
     title.startsWith('Manual QA') ||
+    lowerTitle.startsWith('manual verification') ||
+    lowerTitle.startsWith('manual test') ||
+    lowerTitle.startsWith('manual check') ||
     lowerTitle.includes('(manual)') ||
     lowerTitle.includes('— manual') ||
     lowerTitle.includes('- manual)')

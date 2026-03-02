@@ -2,6 +2,25 @@
 
 All notable changes to Specboard are documented in this file.
 
+## [1.1.1] - 2026-03-02
+
+### Added
+
+- **Feature Deduplication**: When the same feature exists in multiple worktrees, Specboard now intelligently displays only the most relevant instance using a three-tier priority system:
+  1. **Artifact count** - Shows the instance with more completed artifacts (proposal, design, specs, tasks)
+  2. **Task completion** - If tied on artifacts, shows the instance with more completed subtasks
+  3. **Workspace isolation** - If still tied, prefers the instance that is the only feature in its worktree
+
+### Fixed
+
+- **Manual subtask detection**: Extended pattern matching to recognize additional prefixes like "Manual verification:", "Manual test:", and "Manual check:" (previously only "Manual QA" and "(manual)" were detected)
+- **Task counting bug**: Fixed critical bug where completed task counts were always showing as 0, preventing proper feature deduplication (was checking `s.done` instead of `s.completed`)
+
+### Changed
+
+- Deduplication applies to both Live view (swimlanes) and Features view (cards) for consistent experience
+- Features now show the worktree name of the canonical instance being displayed
+
 ## [1.1.0] - 2026-03-02
 
 ### Added
