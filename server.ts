@@ -33,6 +33,7 @@ let rootPath = join(homedir(), "conductor", "workspaces");
 let watcher: FSWatcher | null = null;
 let clients: Set<ReadableStreamDefaultController> = new Set();
 let serverInstance: ReturnType<typeof Bun.serve> | null = null;
+let currentMode: "workspace" | "single" = "workspace";
 
 // =============================================================================
 // Type Definitions
@@ -248,11 +249,55 @@ async function toggleSubtask(
 }
 
 // =============================================================================
+// Mode Detection
+// =============================================================================
+
+/**
+ * Detect whether the root path is a workspace (multi-repo/worktree) or single-worktree structure.
+ * Detection order:
+ * 1. rootPath/openspec/changes/ - single mode (direct project)
+ * 2. rootPath/{child}/openspec/changes/ - single mode (sibling projects)
+ * 3. Default - workspace mode (repo/worktree structure)
+ */
+async function detectMode(path: string): Promise<"workspace" | "single"> {
+  // Check if rootPath itself has openspec/changes
+  if (await dirExists(join(path, "openspec", "changes"))) {
+    return "single";
+  }
+
+  // Check immediate children for openspec/changes
+  if (!(await dirExists(path))) {
+    return "workspace";
+  }
+
+  const entries = await readdir(path, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.isDirectory() && !entry.name.startsWith(".")) {
+      const childPath = join(path, entry.name, "openspec", "changes");
+      if (await dirExists(childPath)) {
+        return "single"; // Found at first level = single mode
+      }
+    }
+  }
+
+  // Default to workspace mode (repo/worktree structure)
+  return "workspace";
+}
+
+// =============================================================================
 // Repository Scanning
 // =============================================================================
 
 /** Get all repositories from the root path */
 async function getRepositories(): Promise<Repository[]> {
+  if (currentMode === "single") {
+    return getRepositoriesSingleMode();
+  }
+  return getRepositoriesWorkspaceMode();
+}
+
+/** Get repositories in workspace mode (existing behavior) */
+async function getRepositoriesWorkspaceMode(): Promise<Repository[]> {
   if (!(await dirExists(rootPath))) {
     return [];
   }
@@ -279,8 +324,56 @@ async function getRepositories(): Promise<Repository[]> {
   return repos;
 }
 
+/** Get repositories in single-worktree mode */
+async function getRepositoriesSingleMode(): Promise<Repository[]> {
+  if (!(await dirExists(rootPath))) {
+    return [];
+  }
+
+  // Check if rootPath itself has openspec/changes (direct project)
+  if (await dirExists(join(rootPath, "openspec", "changes"))) {
+    const { basename } = await import("path");
+    return [{
+      name: basename(rootPath),
+      path: rootPath,
+      worktrees: ["main"],
+    }];
+  }
+
+  // Check immediate children for openspec/changes (sibling projects)
+  const entries = await readdir(rootPath, { withFileTypes: true });
+  const worktrees: string[] = [];
+
+  for (const entry of entries) {
+    if (entry.isDirectory() && !entry.name.startsWith(".")) {
+      const childPath = join(rootPath, entry.name, "openspec", "changes");
+      if (await dirExists(childPath)) {
+        worktrees.push(entry.name);
+      }
+    }
+  }
+
+  if (worktrees.length > 0) {
+    return [{
+      name: "projects",
+      path: rootPath,
+      worktrees,
+    }];
+  }
+
+  return [];
+}
+
 /** Get all features across all worktrees for a repository */
 async function getFeatures(repoName: string): Promise<Feature[]> {
+  if (currentMode === "single") {
+    return getFeaturesSingleMode(repoName);
+  }
+  return getFeaturesWorkspaceMode(repoName);
+}
+
+/** Get features in workspace mode (existing behavior) */
+async function getFeaturesWorkspaceMode(repoName: string): Promise<Feature[]> {
   const repoPath = join(rootPath, repoName);
   const features: Feature[] = [];
 
@@ -318,6 +411,74 @@ async function getFeatures(repoName: string): Promise<Feature[]> {
             const featurePath = join(archivePath, archiveEntry.name);
             const feature = await parseFeature(featurePath, archiveEntry.name, worktreeName, worktreePath, true);
             features.push(feature);
+          }
+        }
+      }
+    }
+  }
+
+  return features;
+}
+
+/** Get features in single-worktree mode */
+async function getFeaturesSingleMode(repoName: string): Promise<Feature[]> {
+  const features: Feature[] = [];
+
+  // Check if rootPath itself has openspec/changes (direct project)
+  const directChangesPath = join(rootPath, "openspec", "changes");
+  if (await dirExists(directChangesPath)) {
+    const entries = await readdir(directChangesPath, { withFileTypes: true });
+
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name !== "archive") {
+        const featurePath = join(directChangesPath, entry.name);
+        const feature = await parseFeature(featurePath, entry.name, "main", rootPath, false);
+        features.push(feature);
+      } else if (entry.name === "archive") {
+        const archivePath = join(directChangesPath, "archive");
+        if (await dirExists(archivePath)) {
+          const archiveEntries = await readdir(archivePath, { withFileTypes: true });
+          for (const archiveEntry of archiveEntries) {
+            if (archiveEntry.isDirectory()) {
+              const featurePath = join(archivePath, archiveEntry.name);
+              const feature = await parseFeature(featurePath, archiveEntry.name, "main", rootPath, true);
+              features.push(feature);
+            }
+          }
+        }
+      }
+    }
+    return features;
+  }
+
+  // Check immediate children for openspec/changes (sibling projects)
+  const entries = await readdir(rootPath, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (entry.isDirectory() && !entry.name.startsWith(".")) {
+      const projectPath = join(rootPath, entry.name);
+      const changesPath = join(projectPath, "openspec", "changes");
+
+      if (await dirExists(changesPath)) {
+        const changeEntries = await readdir(changesPath, { withFileTypes: true });
+
+        for (const changeEntry of changeEntries) {
+          if (changeEntry.isDirectory() && changeEntry.name !== "archive") {
+            const featurePath = join(changesPath, changeEntry.name);
+            const feature = await parseFeature(featurePath, changeEntry.name, entry.name, projectPath, false);
+            features.push(feature);
+          } else if (changeEntry.name === "archive") {
+            const archivePath = join(changesPath, "archive");
+            if (await dirExists(archivePath)) {
+              const archiveEntries = await readdir(archivePath, { withFileTypes: true });
+              for (const archiveEntry of archiveEntries) {
+                if (archiveEntry.isDirectory()) {
+                  const featurePath = join(archivePath, archiveEntry.name);
+                  const feature = await parseFeature(featurePath, archiveEntry.name, entry.name, projectPath, true);
+                  features.push(feature);
+                }
+              }
+            }
           }
         }
       }
@@ -434,9 +595,9 @@ function createServer(port: number) {
     const url = new URL(req.url);
     const path = url.pathname;
 
-    // GET /api/config - Get current workspace root path
+    // GET /api/config - Get current workspace root path and mode
     if (path === "/api/config" && req.method === "GET") {
-      return Response.json({ rootPath });
+      return Response.json({ rootPath, mode: currentMode });
     }
 
     // POST /api/config - Set workspace root path
@@ -444,9 +605,10 @@ function createServer(port: number) {
       const body = await req.json();
       if (body.rootPath && typeof body.rootPath === "string") {
         rootPath = body.rootPath;
+        currentMode = await detectMode(rootPath);
         startWatcher();
         broadcastUpdate();
-        return Response.json({ rootPath, success: true });
+        return Response.json({ rootPath, mode: currentMode, success: true });
       }
       return Response.json({ error: "Invalid rootPath" }, { status: 400 });
     }
@@ -654,6 +816,10 @@ export async function startServer(options: ServerOptions = {}) {
   const port = options.port ?? DEFAULT_PORT;
   rootPath = options.rootPath ?? process.cwd();
   const shouldOpen = options.open ?? false;
+
+  // Detect mode based on directory structure
+  currentMode = await detectMode(rootPath);
+  console.log(`Mode: ${currentMode}`);
 
   serverInstance = createServer(port);
 

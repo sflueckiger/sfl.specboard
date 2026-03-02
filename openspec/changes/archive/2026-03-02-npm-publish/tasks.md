@@ -20,6 +20,6 @@
 
 - [x] 4.1 Run `npm pack` to verify package contents
 - [x] 4.2 Manual QA: Check tarball only contains cli.ts, server.ts, public/, package.json, README.md
-- [ ] 4.3 Run `npm login` (if not already logged in)
-- [ ] 4.4 Run `npm publish --access public`
-- [ ] 4.5 Manual QA: Test `bunx @sflueckiger/specboard --version` works
+- [x] 4.3 Run `npm login` (if not already logged in)
+- [x] 4.4 Run `npm publish --access public`
+- [x] 4.5 Manual QA: Test `bunx @sflueckiger/specboard --version` works

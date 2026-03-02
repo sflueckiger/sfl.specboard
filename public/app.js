@@ -16,6 +16,9 @@ let currentFeature = null;     // Currently viewed feature (in detail view)
 let featuresData = [];         // Cached features data for current repo
 let eventSource = null;        // SSE connection for real-time updates
 let browsingPath = '/';        // Current path in directory browser modal
+let currentMode = 'workspace'; // Detection mode: 'workspace' or 'single'
+let showArchive = localStorage.getItem('specboard_showArchive') === 'true'; // Show archived features in Live view
+let recentDirectories = []; // Recently visited root directories
 
 // =============================================================================
 // DOM Elements
@@ -54,7 +57,9 @@ const sidebarClose = document.getElementById('sidebar-close');
 // LocalStorage keys
 const STORAGE_KEYS = {
   rootPath: 'specboard_rootPath',
-  repo: 'specboard_repo'
+  repo: 'specboard_repo',
+  showArchive: 'specboard_showArchive',
+  recentDirectories: 'specboard_recent_directories'
 };
 
 // =============================================================================
@@ -96,6 +101,8 @@ function updateUrlParams(updates) {
 
 /** Initialize the application */
 async function init() {
+  loadRecentDirectories();
+  renderRecentDirectories();
   await loadConfig();
   await loadRepositories();
 
@@ -148,8 +155,10 @@ async function loadConfig() {
         body: JSON.stringify({ rootPath: savedPath })
       });
       if (updateRes.ok) {
+        const updateData = await updateRes.json();
         currentPathEl.textContent = savedPath;
         browsingPath = savedPath;
+        currentMode = updateData.mode || 'workspace';
         return;
       }
     }
@@ -159,8 +168,108 @@ async function loadConfig() {
     const data = await res.json();
     currentPathEl.textContent = data.rootPath;
     browsingPath = data.rootPath;
+    currentMode = data.mode || 'workspace';
   } catch (err) {
     console.error('Failed to load config:', err);
+  }
+}
+
+// =============================================================================
+// Recent Directories
+// =============================================================================
+
+/** Load recent directories from localStorage */
+function loadRecentDirectories() {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.recentDirectories);
+    recentDirectories = stored ? JSON.parse(stored) : [];
+  } catch (err) {
+    console.error('Failed to load recent directories:', err);
+    recentDirectories = [];
+  }
+}
+
+/** Save recent directories to localStorage */
+function saveRecentDirectories() {
+  try {
+    localStorage.setItem(STORAGE_KEYS.recentDirectories, JSON.stringify(recentDirectories));
+  } catch (err) {
+    console.error('Failed to save recent directories:', err);
+  }
+}
+
+/** Add a path to recent directories (with deduplication and 5-entry limit) */
+function addToRecentDirectories(path) {
+  // Remove if already exists (will re-add at top)
+  recentDirectories = recentDirectories.filter(p => p !== path);
+  // Add to front
+  recentDirectories.unshift(path);
+  // Limit to 5 entries
+  recentDirectories = recentDirectories.slice(0, 5);
+  saveRecentDirectories();
+  renderRecentDirectories();
+}
+
+/** Render recent directories in the sidebar */
+function renderRecentDirectories() {
+  const container = document.getElementById('recent-directories');
+  if (!container) return;
+
+  if (recentDirectories.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+
+  const html = recentDirectories.map(path => {
+    const basename = path.split('/').filter(Boolean).pop() || path;
+    return `
+      <a href="#" class="recent-item" data-path="${escapeHtml(path)}" title="${escapeHtml(path)}">
+        ${escapeHtml(basename)}
+      </a>
+    `;
+  }).join('');
+
+  container.innerHTML = html;
+
+  // Add click handlers
+  container.querySelectorAll('.recent-item').forEach(item => {
+    item.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const path = item.dataset.path;
+      await updateRootPath(path);
+    });
+  });
+}
+
+/** Update root path and refresh the UI */
+async function updateRootPath(path) {
+  try {
+    const res = await fetch('/api/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rootPath: path })
+    });
+
+    if (res.ok) {
+      const data = await res.json();
+      currentPathEl.textContent = path;
+      localStorage.setItem(STORAGE_KEYS.rootPath, path);
+      browsingPath = path;
+      currentMode = data.mode || 'workspace';
+      currentRepo = null;
+      featuresData = [];
+      localStorage.removeItem(STORAGE_KEYS.repo);
+      repoSelect.value = '';
+      addToRecentDirectories(path);
+      await loadRepositories();
+      // Only show empty state if no repo was auto-selected
+      if (!currentRepo) {
+        swimlanes.innerHTML = '<p class="empty-state">Select a repository to view live progress</p>';
+        featuresList.innerHTML = '<p class="empty-state">Select a repository to view features</p>';
+      }
+    }
+  } catch (err) {
+    console.error('Failed to update root path:', err);
   }
 }
 
@@ -233,28 +342,8 @@ function closeModal() {
 }
 
 async function selectDirectory() {
-  try {
-    const res = await fetch('/api/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rootPath: browsingPath })
-    });
-
-    if (res.ok) {
-      currentPathEl.textContent = browsingPath;
-      localStorage.setItem(STORAGE_KEYS.rootPath, browsingPath);
-      currentRepo = null;
-      featuresData = [];
-      localStorage.removeItem(STORAGE_KEYS.repo);
-      repoSelect.value = '';
-      await loadRepositories();
-      swimlanes.innerHTML = '<p class="empty-state">Select a repository to view live progress</p>';
-      featuresList.innerHTML = '<p class="empty-state">Select a repository to view features</p>';
-      closeModal();
-    }
-  } catch (err) {
-    console.error('Failed to set path:', err);
-  }
+  await updateRootPath(browsingPath);
+  closeModal();
 }
 
 // =============================================================================
@@ -275,8 +364,18 @@ async function loadRepositories() {
       repoSelect.appendChild(option);
     });
 
-    if (currentRepo) {
+    // Auto-select and hide dropdown if only one repository
+    if (repos.length === 1) {
+      currentRepo = repos[0].name;
       repoSelect.value = currentRepo;
+      repoSelect.style.display = 'none';
+      localStorage.setItem(STORAGE_KEYS.repo, currentRepo);
+      await loadFeatures(currentRepo);
+    } else {
+      repoSelect.style.display = '';
+      if (currentRepo) {
+        repoSelect.value = currentRepo;
+      }
     }
   } catch (err) {
     console.error('Failed to load repositories:', err);
@@ -311,17 +410,38 @@ async function loadFeatures(repoName) {
 // Live View Rendering
 // =============================================================================
 
+/** Render the swimlanes header with feature count and archive toggle */
+function renderSwimlanesHeader(activeCount) {
+  return `
+    <div class="swimlanes-header">
+      <span class="swimlanes-count">${activeCount} Feature${activeCount !== 1 ? 's' : ''} in active development</span>
+      <label class="archive-toggle">
+        <input type="checkbox" id="show-archive-toggle" ${showArchive ? 'checked' : ''}>
+        <span class="toggle-label">Show Archive</span>
+      </label>
+    </div>
+  `;
+}
+
 /** Render features as swimlanes with kanban columns */
 function renderFeatures(features) {
-  // Filter out archived features
   const activeFeatures = features.filter(f => !f.isArchived);
+  const archivedFeatures = features.filter(f => f.isArchived);
 
-  if (activeFeatures.length === 0) {
+  if (activeFeatures.length === 0 && archivedFeatures.length === 0) {
     swimlanes.innerHTML = '<p class="empty-state">No features found in this repository</p>';
     return;
   }
 
-  swimlanes.innerHTML = activeFeatures.map(feature => renderFeatureLane(feature)).join('');
+  let html = renderSwimlanesHeader(activeFeatures.length);
+  html += activeFeatures.map(feature => renderFeatureLane(feature, false)).join('');
+
+  // Render archived features if toggle is enabled
+  if (showArchive && archivedFeatures.length > 0) {
+    html += archivedFeatures.map(feature => renderFeatureLane(feature, true)).join('');
+  }
+
+  swimlanes.innerHTML = html;
 
   // Add click handlers for action buttons (Finder, VS Code, Terminal)
   swimlanes.querySelectorAll('.action-btn').forEach(btn => {
@@ -364,6 +484,16 @@ function renderFeatures(features) {
       openFeatureDetailWithTab(feature, artifact);
     });
   });
+
+  // Add change handler for archive toggle
+  const archiveToggle = document.getElementById('show-archive-toggle');
+  if (archiveToggle) {
+    archiveToggle.addEventListener('change', (e) => {
+      showArchive = e.target.checked;
+      localStorage.setItem(STORAGE_KEYS.showArchive, showArchive);
+      renderFeatures(featuresData);
+    });
+  }
 }
 
 function openSubtasksSidebar(task) {
@@ -482,16 +612,9 @@ function switchView(view) {
 // Features List View
 // =============================================================================
 
-/** Render features as clickable cards */
-function renderFeaturesList() {
-  const activeFeatures = featuresData.filter(f => !f.isArchived);
-
-  if (activeFeatures.length === 0) {
-    featuresList.innerHTML = '<p class="empty-state">No features found in this repository</p>';
-    return;
-  }
-
-  featuresList.innerHTML = activeFeatures.map((feature, index) => `
+/** Render a feature list card */
+function renderFeatureCard(feature, index) {
+  return `
     <div class="feature-list-card" data-feature-index="${index}">
       <div class="feature-list-left">
         <span class="feature-list-name">${escapeHtml(feature.name)}</span>
@@ -517,15 +640,43 @@ function renderFeaturesList() {
         </svg>
       </div>
     </div>
-  `).join('');
+  `;
+}
+
+/** Render features as clickable cards */
+function renderFeaturesList() {
+  const activeFeatures = featuresData.filter(f => !f.isArchived);
+  const archivedFeatures = featuresData.filter(f => f.isArchived);
+
+  if (activeFeatures.length === 0 && archivedFeatures.length === 0) {
+    featuresList.innerHTML = '<p class="empty-state">No features found in this repository</p>';
+    return;
+  }
+
+  let html = '';
+
+  // Render active features
+  html += activeFeatures.map((feature, index) => renderFeatureCard(feature, index)).join('');
+
+  // Render archived features with separator
+  if (archivedFeatures.length > 0) {
+    html += `<div class="archive-separator"><span>Archived</span></div>`;
+    html += archivedFeatures.map((feature, index) =>
+      renderFeatureCard(feature, activeFeatures.length + index)
+    ).join('');
+  }
+
+  featuresList.innerHTML = html;
+
+  // Combine all features for click handler indexing
+  const allFeatures = [...activeFeatures, ...archivedFeatures];
 
   // Add click handlers
   featuresList.querySelectorAll('.feature-list-card').forEach(card => {
     card.addEventListener('click', (e) => {
       if (e.target.closest('.open-folder-btn')) return;
       const index = parseInt(card.dataset.featureIndex);
-      const activeFeatures = featuresData.filter(f => !f.isArchived);
-      openFeatureDetail(activeFeatures[index]);
+      openFeatureDetail(allFeatures[index]);
     });
   });
 
@@ -1065,7 +1216,7 @@ function renderMarkdown(text) {
   return `<pre>${escapeHtml(text)}</pre>`;
 }
 
-function renderFeatureLane(feature) {
+function renderFeatureLane(feature, isArchived = false) {
     // Group tasks by status
     const todoTasks = feature.tasks.filter(t => t.status === 'todo');
     const inProgressTasks = feature.tasks.filter(t => t.status === 'in_progress');
@@ -1077,7 +1228,7 @@ function renderFeatureLane(feature) {
     const featureData = JSON.stringify(feature).replace(/'/g, "&#39;");
 
     return `
-      <div class="feature-lane" data-feature='${featureData}'>
+      <div class="feature-lane ${isArchived ? 'archived' : ''}" data-feature='${featureData}'>
         <div class="lane-header">
           <div class="lane-header-left">
             <div class="lane-title-row">
@@ -1105,9 +1256,10 @@ function renderFeatureLane(feature) {
               </div>
             </div>
           </div>
-          <span class="lane-meta">
-            ${feature.tasks.length} tasks${totalSubtasks > 0 ? ` | ${completedSubtasks}/${totalSubtasks} subtasks` : ''}
-          </span>
+          <div class="lane-meta">
+            <span>${feature.tasks.length} tasks${totalSubtasks > 0 ? ` | ${completedSubtasks}/${totalSubtasks} subtasks` : ''}</span>
+            ${isArchived ? '<span class="archived-badge">Archived</span>' : ''}
+          </div>
         </div>
         <div class="kanban-board">
           <div class="kanban-column todo">
